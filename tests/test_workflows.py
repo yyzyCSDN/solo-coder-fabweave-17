@@ -127,6 +127,18 @@ def test_dispatch_excludes_held_and_frozen_lots_and_breaks_ties_stably():
     assert [item.lot_id for item in rank_candidates(candidates, 10)] == ["LOT-A", "LOT-B"]
 
 
+def test_dispatch_keeps_near_deadline_urgency_ordered_without_a_floor_tier():
+    from fabweave.dispatch.priority import dispatch_score
+
+    with pytest.raises(ValueError):
+        dispatch_score(float("nan"), 1, 0, 0)
+    # Inside the old 2.5h floor, urgency is still differentiated...
+    assert dispatch_score(0.1, 5, 0, 0) > dispatch_score(1.0, 5, 0, 0) > dispatch_score(2.4, 5, 0, 0)
+    # ...and stays finite at or past due instead of exploding.
+    assert dispatch_score(0.0, 5, 0, 0) >= dispatch_score(0.1, 5, 0, 0)
+    assert dispatch_score(-2.0, 5, 0, 0) == dispatch_score(0.0, 5, 0, 0)
+
+
 def test_reticle_batch_reservation_is_atomic_and_idempotent():
     book = ReservationBook()
     initial = Reservation("RET-1", "JOB-1", TimeBox(0, 10), 1)
@@ -182,6 +194,21 @@ def test_hold_release_rejects_stale_version_missing_disposition_and_blockers():
     assert release_decision(state, 2, 100).reasons == ("stale_hold_version",)
     reasons = release_decision(state, 3, 100).reasons
     assert reasons == ("missing_disposition:QA", "active_blocker:CUSTOMER")
+
+
+def test_released_hold_replay_must_match_the_released_revision():
+    # Released at revision 1, then revised (new disposition/blocker) to revision 2.
+    state = HoldState("H-1", 2, frozenset({"QA2"}), frozenset(), frozenset({"CUSTOMER"}), released_at=50, released_version=1)
+    assert release_decision(state, 1, 100).reasons == ("stale_hold_version",)
+    stale_now = release_decision(state, 2, 100)
+    assert not stale_now.allowed and "stale_hold_version" in stale_now.reasons
+    # A replay at the exact revision the release was recorded against is idempotent.
+    current = HoldState("H-2", 2, frozenset(), released_at=60, released_version=2)
+    decision = release_decision(current, 2, 100)
+    assert decision.allowed and decision.evidence["replay"] is True
+    # A released state without a recorded release revision cannot validate itself.
+    legacy = HoldState("H-3", 1, frozenset(), released_at=60)
+    assert not release_decision(legacy, 1, 100).allowed
 
 
 def test_genealogy_traverses_both_directions_without_duplicates():
@@ -274,6 +301,13 @@ def test_material_readiness_combines_queue_and_chemical_clocks():
 def test_rank_releasable_applies_hold_decisions_before_dispatch():
     candidates = [DispatchCandidate("A", 1, 2), DispatchCandidate("B", 2, 2)]
     holds = {"A": HoldState("H", 1, frozenset({"QA"}))}
+    assert [item.lot_id for item in rank_releasable(candidates, 10, holds, {"A": 1})] == ["B"]
+
+
+def test_rank_releasable_blocks_stale_replay_of_released_hold():
+    candidates = [DispatchCandidate("A", 1, 2), DispatchCandidate("B", 2, 2)]
+    holds = {"A": HoldState("H", 2, frozenset({"QA2"}), released_at=5, released_version=1)}
+    # Replaying the release command with the old version must not make A dispatchable.
     assert [item.lot_id for item in rank_releasable(candidates, 10, holds, {"A": 1})] == ["B"]
 
 

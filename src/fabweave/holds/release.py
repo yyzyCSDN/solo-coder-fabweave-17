@@ -17,13 +17,20 @@ class HoldState:
     completed_dispositions: frozenset[str] = frozenset()
     active_blockers: frozenset[str] = frozenset()
     released_at: int | None = None
+    released_version: int | None = None
 
 
 def release_decision(state: HoldState, expected_version: int, at: int) -> Decision:
     if expected_version != state.version:
         return deny("stale_hold_version", current_version=state.version)
     if state.released_at is not None:
-        return allow(hold_version=state.version, released_at=state.released_at, replay=True)
+        # Only the exact revision the release was issued against may replay as
+        # an acknowledged release. A replay carrying an older version is a
+        # stale command against revised dispositions/blockers, so it must be
+        # re-evaluated by the gate below rather than treated as current state.
+        if state.released_version == state.version:
+            return allow(hold_version=state.version, released_at=state.released_at, replay=True)
+        return deny("stale_hold_version", current_version=state.version, released_version=state.released_version)
     missing = sorted(state.required_dispositions - state.completed_dispositions)
     reasons = [*(f"missing_disposition:{item}" for item in missing), *(f"active_blocker:{item}" for item in sorted(state.active_blockers))]
     evidence = {"hold_version": state.version, "evaluated_at": at}
