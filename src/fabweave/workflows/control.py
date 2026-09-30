@@ -60,7 +60,10 @@ def rank_releasable(
         state = holds.get(candidate.lot_id)
         blocked = candidate.active_hold
         if state is not None:
-            expected = state.version
+            # Honor the caller's expected version.  Falling back to the current
+            # version when none is supplied would let a stale release command
+            # replay as a valid release past the hold gate.
+            expected = expected_versions.get(candidate.lot_id, state.version)
             blocked = blocked or not release_decision(state, expected, now).allowed
         evaluated.append(replace(candidate, active_hold=blocked))
     return rank_candidates(evaluated, now)

@@ -20,6 +20,9 @@ class HoldState:
 
 
 def release_decision(state: HoldState, expected_version: int, at: int) -> Decision:
+    # Version is verified before the released short-circuit, so an already
+    # released hold replayed with an old version is rejected as stale instead
+    # of being acknowledged as a valid idempotent replay.
     if expected_version != state.version:
         return deny("stale_hold_version", current_version=state.version)
     if state.released_at is not None:

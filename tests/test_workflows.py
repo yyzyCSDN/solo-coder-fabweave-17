@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+
 import pytest
 
 from fabweave.chamber.matching import Tolerance, mismatch_reasons
@@ -14,7 +16,7 @@ from fabweave.core.timebox import TimeBox, covered_duration, merge_timeboxes
 from fabweave.core.units import fraction_to_ppm, ppm_to_fraction
 from fabweave.core.versioning import RevisionHistory
 from fabweave.dedication.tool import DedicationPolicy, policy_decision
-from fabweave.dispatch.priority import DispatchCandidate, rank_candidates
+from fabweave.dispatch.priority import DispatchCandidate, dispatch_score, rank_candidates
 from fabweave.energy.demand import coincident_peak, demand_violations
 from fabweave.genealogy.carrier import GenealogyGraph
 from fabweave.holds.release import HoldState, release_decision
@@ -127,6 +129,24 @@ def test_dispatch_excludes_held_and_frozen_lots_and_breaks_ties_stably():
     assert [item.lot_id for item in rank_candidates(candidates, 10)] == ["LOT-A", "LOT-B"]
 
 
+def test_dispatch_keeps_urgency_separated_near_deadline_and_when_overdue():
+    # Inside the old 2.5-hour clamp all near-deadline lots scored identically.
+    assert dispatch_score(2.0, 5, 0, 0) < dispatch_score(1.0, 5, 0, 0) < dispatch_score(0.5, 5, 0, 0)
+    assert dispatch_score(0.25, 5, 0, 0) < dispatch_score(0.1, 5, 0, 0)
+    # Due-now must be finite, and overdue lots must not fall behind due-now.
+    assert math.isfinite(dispatch_score(0.0, 5, 0, 0))
+    assert dispatch_score(0.0, 5, 0, 0) > dispatch_score(0.5, 5, 0, 0)
+    assert dispatch_score(-2.0, 5, 0, 0) > dispatch_score(-1.0, 5, 0, 0) > dispatch_score(0.0, 5, 0, 0)
+
+
+def test_dispatch_tie_break_still_uses_lot_id_after_score_fix():
+    candidates = [DispatchCandidate("Z", 1, 2), DispatchCandidate("A", 1, 2), DispatchCandidate("M", 1, 2)]
+    assert [item.lot_id for item in rank_candidates(candidates, 10)] == ["A", "M", "Z"]
+    # Freeze rule still applies (frozen_until == now is released).
+    frozen = [DispatchCandidate("A", 0.1, 1, frozen_until=10), DispatchCandidate("B", 5, 1, frozen_until=11)]
+    assert [item.lot_id for item in rank_candidates(frozen, 10)] == ["A"]
+
+
 def test_reticle_batch_reservation_is_atomic_and_idempotent():
     book = ReservationBook()
     initial = Reservation("RET-1", "JOB-1", TimeBox(0, 10), 1)
@@ -182,6 +202,16 @@ def test_hold_release_rejects_stale_version_missing_disposition_and_blockers():
     assert release_decision(state, 2, 100).reasons == ("stale_hold_version",)
     reasons = release_decision(state, 3, 100).reasons
     assert reasons == ("missing_disposition:QA", "active_blocker:CUSTOMER")
+
+
+def test_hold_release_rejects_stale_replay_of_already_released_hold():
+    released = HoldState("H-1", 3, frozenset(), released_at=50)
+    stale = release_decision(released, 2, 100)
+    assert not stale.allowed and stale.reasons == ("stale_hold_version",)
+    assert stale.evidence["current_version"] == 3
+    # A replay at the current version is still the idempotent allow.
+    replay = release_decision(released, 3, 100)
+    assert replay.allowed and replay.evidence["replay"] is True
 
 
 def test_genealogy_traverses_both_directions_without_duplicates():
@@ -275,6 +305,16 @@ def test_rank_releasable_applies_hold_decisions_before_dispatch():
     candidates = [DispatchCandidate("A", 1, 2), DispatchCandidate("B", 2, 2)]
     holds = {"A": HoldState("H", 1, frozenset({"QA"}))}
     assert [item.lot_id for item in rank_releasable(candidates, 10, holds, {"A": 1})] == ["B"]
+
+
+def test_rank_releasable_blocks_stale_release_replay():
+    # Hold already released at the current version; a command carrying the old
+    # version must not be treated as a valid release through the hold gate.
+    released = HoldState("H", 2, frozenset(), released_at=5)
+    candidates = [DispatchCandidate("A", 0.1, 1), DispatchCandidate("B", 5, 1)]
+    assert [item.lot_id for item in rank_releasable(candidates, 10, {"A": released}, {"A": 1})] == ["B"]
+    # Current-version replay is allowed and the urgent lot wins dispatch.
+    assert [item.lot_id for item in rank_releasable(candidates, 10, {"A": released}, {"A": 2})] == ["A", "B"]
 
 
 def test_reserve_qualified_is_fail_closed_and_then_atomic():

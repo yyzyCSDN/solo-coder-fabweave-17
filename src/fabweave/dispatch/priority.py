@@ -10,7 +10,15 @@ def dispatch_score(hours_to_due: float, remaining_steps: float, hold_risk: float
         raise ValueError("dispatch inputs must be finite")
     if remaining_steps <= 0:
         raise ValueError("remaining steps must be positive")
-    urgency = 1.0 / max(hours_to_due, 2.5)
+    # Keep urgency strictly increasing as the due time closes in: flooring the
+    # reciprocal's denominator merged every lot inside a fixed near-deadline
+    # horizon into one tier.  The additive denominator stays finite at the due
+    # time.  Overdue lots are at least as urgent as due-now lots and keep
+    # gaining urgency with their lateness, rather than being collapsed.
+    if hours_to_due > 0:
+        urgency = 1.0 / (hours_to_due + 2.5)
+    else:
+        urgency = 0.4 + -hours_to_due
     flow = 1.0 / remaining_steps
     return 4.0 * urgency + 1.5 * flow + hold_risk - setup_penalty
 
